@@ -416,7 +416,14 @@ def dreamer_image_loss(X, Y_pred, Y, image_encoder, image_decoder,
                            f"next_images_pred shape {next_images_pred.shape}")
         # Weighted MSE: loss = (weights * (pred - target)**2).sum() / weights.sum()
         squared_error = (next_images_pred - next_images_true) ** 2
-        reconstruction_loss = (reconstruction_weights * squared_error).sum() / (reconstruction_weights.sum() + 1e-8)
+        # weighted sum per sample: [B]
+        num = (reconstruction_weights * squared_error).sum(dim=(1,2,3))
+
+        # weight mass per sample: [B]
+        den = reconstruction_weights.sum(dim=(1,2,3)) + 1e-8
+
+        # mean over batch
+        reconstruction_loss = (num / den).mean()
     else:
         reconstruction_loss = F.mse_loss(next_images_pred, next_images_true)
     

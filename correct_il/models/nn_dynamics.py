@@ -341,7 +341,8 @@ def dreamer_image_loss(X, Y_pred, Y, image_encoder, image_decoder,
                        dynamics_net=None, lipschitz_constraint=None,
                        soft_lipschitz_penalty_weight=None, 
                        soft_lipschitz_sampling_eps=None,
-                       soft_lipschitz_n_samples=None):
+                       soft_lipschitz_n_samples=None,
+                       reconstruction_weights=None):
     """
     Dreamer-style loss for image-based dynamics models.
     
@@ -370,6 +371,8 @@ def dreamer_image_loss(X, Y_pred, Y, image_encoder, image_decoder,
         soft_lipschitz_penalty_weight: Weight for Lipschitz penalty
         soft_lipschitz_sampling_eps: Epsilon for Lipschitz sampling
         soft_lipschitz_n_samples: Number of samples for Lipschitz estimation
+        reconstruction_weights: Optional weight matrix of same shape as next_images_pred/next_images_true
+                               for weighted MSE reconstruction loss (default: None)
     
     Returns:
         Dictionary with loss components
@@ -404,7 +407,18 @@ def dreamer_image_loss(X, Y_pred, Y, image_encoder, image_decoder,
     
     # Images should already be normalized to [0, 1] outside the model
     
-    reconstruction_loss = F.mse_loss(next_images_pred, next_images_true)
+    # Compute reconstruction loss with optional weights
+    if reconstruction_weights is not None:
+        # Ensure weights are on the same device and have the same shape
+        reconstruction_weights = reconstruction_weights.to(next_images_pred.device)
+        if reconstruction_weights.shape != next_images_pred.shape:
+            raise ValueError(f"reconstruction_weights shape {reconstruction_weights.shape} must match "
+                           f"next_images_pred shape {next_images_pred.shape}")
+        # Weighted MSE: loss = (weights * (pred - target)**2).sum() / weights.sum()
+        squared_error = (next_images_pred - next_images_true) ** 2
+        reconstruction_loss = (reconstruction_weights * squared_error).sum() / (reconstruction_weights.sum() + 1e-8)
+    else:
+        reconstruction_loss = F.mse_loss(next_images_pred, next_images_true)
     
     # 3. Lipschitz penalty (if enabled) - applied to latent space dynamics
     lipschitz_penalty = None
@@ -559,7 +573,7 @@ class ImageEncoder(nn.Module):
     CNN-based image encoder that converts images to latent state vectors.
 
     """
-    def __init__(self, image_shape=(256, 256, 3), latent_dim=100, 
+    def __init__(self, image_shape=(256, 256, 3), latent_dim=512, 
                  image_mean=None, image_std=None):
         """
         Args:
@@ -858,7 +872,8 @@ class ImageWorldModel:
                      max_steps=1e10, set_transformations=True, use_wandb=False, 
                      wandb_project=None, wandb_name=None, visualize_reconstructions=False,
                      num_vis_samples=4, vis_output_dir=None, checkpoint_dir=None, 
-                     checkpoint_interval=10, visualize_interval=200, *args, **kwargs):
+                     checkpoint_interval=10, visualize_interval=200, reconstruction_weights=None, 
+                     *args, **kwargs):
         """
         Train the image-based dynamics model using Dreamer-style loss.
         
@@ -895,6 +910,7 @@ class ImageWorldModel:
         # Get action dimension from first batch
         first_batch = next(iter(norm_dataloader))
         act_dim = first_batch['actions'].shape[1]
+        
         
         # Compute normalization stats incrementally (online algorithm)
         # Initialize accumulators
@@ -982,9 +998,16 @@ class ImageWorldModel:
         #if self.device == 'cuda':
         #    torch.cuda.empty_cache()
         
+        # Convert reconstruction_weights to tensor if provided
+        if reconstruction_weights is not None:
+            if isinstance(reconstruction_weights, np.ndarray):
+                reconstruction_weights = torch.from_numpy(reconstruction_weights).float()
+            elif not isinstance(reconstruction_weights, torch.Tensor):
+                reconstruction_weights = torch.tensor(reconstruction_weights).float()
+        
         # Create Dreamer-style loss function
         # It will receive s_latent_batch (already encoded in forward pass)
-        def dreamer_loss_fn(batch_X, Y_pred, Y_true):
+        def dreamer_loss_fn(batch_X, Y_pred, Y_true, batch_weights=None):
             s_latent_batch, a_batch, next_images_batch = batch_X[0], batch_X[1], batch_X[2]
             
             # Check if Lipschitz constraints should be applied
@@ -1010,7 +1033,8 @@ class ImageWorldModel:
                 lipschitz_constraint=lipschitz_constraint,
                 soft_lipschitz_penalty_weight=soft_lipschitz_penalty_weight,
                 soft_lipschitz_sampling_eps=soft_lipschitz_sampling_eps,
-                soft_lipschitz_n_samples=soft_lipschitz_n_samples
+                soft_lipschitz_n_samples=soft_lipschitz_n_samples,
+                reconstruction_weights=batch_weights
             )
         
         # Create a wrapper model that encodes images per-batch and uses (s, a) for forward pass
@@ -1037,24 +1061,40 @@ class ImageWorldModel:
             images_np = dataset.images
             next_images_np = dataset.next_images
             actions_np = dataset.actions
+            # Extract weights if available
+            if reconstruction_weights is None and hasattr(dataset, 'reconstruction_weights') and dataset.reconstruction_weights is not None:
+                reconstruction_weights = dataset.reconstruction_weights
         elif isinstance(dataset, H5pyImageDataset) and dataset.load_into_memory:
             images_np = dataset.images
             next_images_np = dataset.next_images
             actions_np = dataset.actions
+            # Extract weights if available
+            if reconstruction_weights is None and hasattr(dataset, 'reconstruction_weights') and dataset.reconstruction_weights is not None:
+                reconstruction_weights = dataset.reconstruction_weights
         else:
             # Fallback: convert dataset to numpy arrays
             print("Converting dataset to numpy arrays for faster training...")
             images_list = []
             next_images_list = []
             actions_list = []
+            weights_list = []
             for i in range(len(dataset)):
                 item = dataset[i]
                 images_list.append(item['images'])
                 next_images_list.append(item['next_images'])
                 actions_list.append(item['actions'])
+                if 'reconstruction_weights' in item:
+                    weights_list.append(item['reconstruction_weights'])
+            print('converting imgs')
             images_np = np.array(images_list, dtype=np.float32)
+            print('converting next imgs')
             next_images_np = np.array(next_images_list, dtype=np.float32)
+            print('converting actions')
             actions_np = np.array(actions_list, dtype=np.float32)
+            # Extract weights if available
+            if reconstruction_weights is None and len(weights_list) > 0:
+                print('converting mask weights')
+                reconstruction_weights = np.array(weights_list, dtype=np.float32)
         
         # Convert Y to numpy if needed
         Y_np = Y.numpy() if isinstance(Y, torch.Tensor) else Y
@@ -1100,6 +1140,11 @@ class ImageWorldModel:
                 batch_next_images = torch.from_numpy(next_images_np[batch_indices]).float().to(self.device)
                 batch_Y = torch.from_numpy(Y_np[batch_indices]).float().to(self.device)
                 
+                # Extract batch weights if reconstruction_weights is provided
+                batch_weights = None
+                if reconstruction_weights is not None:
+                    batch_weights = torch.from_numpy(reconstruction_weights[batch_indices]).float().to(self.device)
+               
                 self.dynamics_opt.zero_grad()
                 # Forward pass encodes images per-batch and stores s_latent
                 Y_hat = wrapped_model.forward(batch_images, batch_actions, batch_next_images)
@@ -1108,7 +1153,7 @@ class ImageWorldModel:
                 # Pass s_latent to loss function instead of images
                 batch_X_for_loss = (s_latent_batch, batch_actions, batch_next_images)
                 
-                loss_dict = dreamer_loss_fn(batch_X_for_loss, Y_hat, batch_Y)
+                loss_dict = dreamer_loss_fn(batch_X_for_loss, Y_hat, batch_Y, batch_weights=batch_weights)
                 loss_dict['loss'].backward()
                 self.dynamics_opt.step()
                 loss_dict['loss'] = loss_dict['loss'].detach().to('cpu').numpy()
@@ -1122,8 +1167,10 @@ class ImageWorldModel:
                 # Log to wandb (per batch)
                 if use_wandb and WANDB_AVAILABLE:
                     log_dict = {f"batch_{k}": v for k, v in loss_dict.items() if k != "mse_loss_tensor"}
-                    log_dict["step"] = steps_so_far
-                    wandb.log(log_dict)
+                    # Ensure step is monotonically increasing
+                    current_wandb_step = wandb.run.step if wandb.run else 0
+                    log_step = max(current_wandb_step + 1, steps_so_far)
+                    wandb.log(log_dict, step=log_step)
                 
                 if steps_so_far >= max_steps:
                     print("Number of grad steps exceeded threshold. Terminating early.")
@@ -1208,7 +1255,10 @@ class ImageWorldModel:
                         
                         # Log to wandb if available
                         if use_wandb and WANDB_AVAILABLE:
-                            wandb.log({f"reconstructions epoch {ep+1}": wandb.Image(fig)}, step=ep)
+                            # Ensure step is monotonically increasing by using max of wandb's current step and our step
+                            current_wandb_step = wandb.run.step if wandb.run else 0
+                            log_step = max(current_wandb_step + 1, steps_so_far)
+                            wandb.log({f"reconstructions epoch {ep+1}": wandb.Image(fig)}, step=log_step)
                         
                         # Save to file
                         import os
@@ -1220,13 +1270,16 @@ class ImageWorldModel:
                         vis_path = os.path.join(vis_dir, f"epoch_{ep:04d}.png")
                         plt.savefig(vis_path, dpi=100, bbox_inches='tight')
                         plt.close(fig)
-                        print(f"Saved reconstruction visualization to {vis_path}")
+                       # print(f"Saved reconstruction visualization to {vis_path}")
                 
                 # Log to wandb (per epoch)
                 if use_wandb and WANDB_AVAILABLE:
                     log_dict = {f"epoch_{k}": v/num_batches for k, v in ep_loss.items()}
                     log_dict["epoch"] = ep
-                    wandb.log(log_dict)
+                    # Ensure step is monotonically increasing by using max of wandb's current step and our step
+                    current_wandb_step = wandb.run.step if wandb.run else 0
+                    log_step = max(current_wandb_step + 1, steps_so_far)
+                    wandb.log(log_dict, step=log_step)
                 
                 # Save checkpoint every checkpoint_interval epochs
                 if checkpoint_dir is not None and (ep + 1) % checkpoint_interval == 0:

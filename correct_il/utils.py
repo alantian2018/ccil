@@ -133,12 +133,20 @@ class H5pyLoader(DataLoader):
         data_path = getattr(config_data, 'h5py_path', config_data.pkl)
         demo_prefix = getattr(config_data, 'demo_prefix', 'demo_')
         load_into_memory = getattr(config_data, 'load_into_memory', True)  # Default to True for speed
+    
+        action_horizon = int(getattr(config_data, 'action_horizon', 10))
+        mask_weight = getattr(config_data, 'mask_weight', 4)  # Default mask_weight
+      
         
         # Return a Dataset (load into memory by default for faster training)
-        dataset = H5pyImageDataset(data_path, demo_prefix=demo_prefix, load_into_memory=load_into_memory)
+        dataset = H5pyImageDataset(data_path, demo_prefix=demo_prefix, 
+                                   load_into_memory=load_into_memory,
+                                   action_horizon=action_horizon,
+                                   mask_weight=mask_weight)
         print(f'Created H5pyImageDataset with {len(dataset)} samples')
         print(f'Image shape: {dataset.image_shape}, Action dim: {dataset.act_dim}')
         print(f'Load into memory: {load_into_memory}')
+        print(f'Action horizon: {action_horizon} steps')
         
         return dataset
 
@@ -512,7 +520,10 @@ def parse_config(parser):
 
     # Generate intermediate filenames
     dynamics_optional = "" if config.dynamics.lipschitz_type == "none" else f"L{config.dynamics.lipschitz_constraint}"
-    config['output']['dynamics'] = os.path.join(_folder, f"dynamics_{config.dynamics.lipschitz_type}{dynamics_optional}")
+    # Add action_horizon to output folder if specified
+    action_horizon = getattr(config.data, 'action_horizon', None)
+    action_horizon_suffix = f"_h{action_horizon}" if action_horizon and action_horizon != 1 else ""
+    config['output']['dynamics'] = os.path.join(_folder, f"dynamics_{config.dynamics.lipschitz_type}{dynamics_optional}{action_horizon_suffix}")
     
     # Handle optional aug and policy sections
     if hasattr(config, 'aug') and hasattr(config.aug, 'type'):

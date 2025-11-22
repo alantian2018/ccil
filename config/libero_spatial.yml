@@ -1,0 +1,42 @@
+seed: 42
+no_gpu: False
+env: "libero_spatial"
+use_wandb: true
+wandb_project: "ccil-dynamics"
+wandb_name: "libero_spatial"
+
+visualize_reconstructions: true
+visualize_interval: 50
+num_vis_samples: 4
+checkpoint_interval: 200
+output:
+  location: "output/"
+  folder_suffix: ""
+data:
+  loader: 'h5py'
+  h5py_path: 'data/hdf5/trajectories_11-19-22-56-28.hdf5'
+  demo_prefix: 'demo_'
+  use_images: true
+  image_shape: [256, 256, 3]  # Only agentview image (3 channels)
+  reshape_images: true
+  num_traj: '...'
+  horizon: '...'
+  num_datapoints: '...'
+  action_horizon: 10
+  mask_weight: 4
+dynamics:
+  lipschitz_type: "soft_sampling"
+  lipschitz_constraint: 2.0
+  soft_lipschitz_penalty_weight: 0.001
+  soft_lipschitz_sampling_eps: 0.0003
+  soft_lipschitz_n_samples: 5
+  lr: 0.0001
+  weight_decay: 0.00001
+  layers: [512, 512]
+  activation: relu
+  train_epochs: 20000
+  batch_size: 32  # Smaller batch size for images
+  val_percentage: 1
+  latent_dim: 1024
+  reconstruction_weight: 1.0
+  dynamics_weight: 1.0

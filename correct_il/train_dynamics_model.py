@@ -165,7 +165,7 @@ def main():
     
     if use_images:
         # Use ImageWorldModel
-        latent_dim = getattr(d_config, 'latent_dim', 100)
+        latent_dim = getattr(d_config, 'latent_dim', 512)
         reconstruction_weight = getattr(d_config, 'reconstruction_weight', 1.0)
         dynamics_weight = getattr(d_config, 'dynamics_weight', 1.0)
         
@@ -220,7 +220,7 @@ def main():
         else:
             from correct_il.datasets import ImageDynamicsDataset
             train_dataset = ImageDynamicsDataset(images, actions, next_images)
-        
+         
         train_loss = dynamics.fit_dynamics(
             train_dataset,
             train_epochs=d_config.train_epochs,
@@ -228,7 +228,7 @@ def main():
             set_transformations=True,
             use_wandb=use_wandb,
             wandb_project=wandb_project,
-            wandb_name=wandb_name,
+            wandb_name=f"{wandb_name}_{d_config.lipschitz_type}_horizon_{train_dataset.action_horizon}",
             visualize_reconstructions=visualize_reconstructions,
             num_vis_samples=num_vis_samples,
             vis_output_dir=vis_output_dir,

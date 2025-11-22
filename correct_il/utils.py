@@ -8,8 +8,8 @@ import numpy as np
 import random
 from typing import Tuple
 import pickle
-import gym,d4rl
-
+import gym
+from tqdm import tqdm
 
 from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
@@ -36,7 +36,226 @@ def load_data(config_data):
     data_path = config_data.pkl
     with open(data_path, "rb") as f:
         data = pickle.load(f)
+    print('loaded from pickle file...')
     return build_dataset(data)
+
+
+# ============================================================================
+# Flexible Data Loading System
+# ============================================================================
+
+class DataLoader:
+    """
+    Base class for data loaders. Subclass this to create custom data loaders.
+    """
+    def load(self, config_data):
+        """
+        Load data from the specified source.
+        
+        Args:
+            config_data: Configuration object with data loading parameters
+        
+        Returns:
+            Tuple of (observations, actions, next_observations) as numpy arrays
+            For images: observations and next_observations are (N, H, W, C) arrays
+            For states: observations and next_observations are (N, state_dim) arrays
+        """
+        raise NotImplementedError
+
+
+class PickleTrajectoryLoader(DataLoader):
+    """
+    Loads data from pickle files containing trajectory lists.
+    Each trajectory is a dict with "observations" and "actions" keys.
+    """
+    def load(self, config_data):
+        data_path = config_data.pkl
+        with open(data_path, "rb") as f:
+            data = pickle.load(f)
+        print(f'Loaded {len(data)} trajectories from pickle file: {data_path}')
+        return build_dataset(data)
+
+
+class PickleImageLoader(DataLoader):
+    """
+    Loads image data from pickle files containing trajectory lists.
+    Handles both 4D images and flattened images.
+    """
+    def load(self, config_data):
+        data_path = config_data.pkl
+        with open(data_path, "rb") as f:
+            data = pickle.load(f)
+        
+        images_list = []
+        actions_list = []
+        next_images_list = []
+        
+        image_shape = getattr(config_data, 'image_shape', None)
+        
+        for traj in data:
+            obs = traj["observations"]
+            acts = traj["actions"]
+            
+            # Check if observations are images (4D) or flattened
+            if len(obs.shape) == 4:  # (T, H, W, C) - images
+                images_list.append(obs[:-1])
+                next_images_list.append(obs[1:])
+                actions_list.append(acts[:-1])
+            else:
+                # Flattened images - need to reshape
+                if image_shape is None:
+                    raise ValueError("image_shape must be provided in config when observations are flattened")
+                H, W, C = image_shape
+                if obs.shape[1] != H * W * C:
+                    raise ValueError(f"Flattened observation dimension {obs.shape[1]} doesn't match image_shape {image_shape}")
+                obs_reshaped = obs.reshape(len(obs), H, W, C)
+                images_list.append(obs_reshaped[:-1])
+                next_images_list.append(obs_reshaped[1:])
+                actions_list.append(acts[:-1])
+        
+        images = np.concatenate(images_list, axis=0)
+        actions = np.concatenate(actions_list, axis=0)
+        next_images = np.concatenate(next_images_list, axis=0)
+        
+        print(f'Loaded {len(images)} image samples from {len(data)} trajectories')
+        print(f'Image shape: {images.shape}, Action shape: {actions.shape}')
+        
+        return images, actions, next_images
+
+class H5pyLoader(DataLoader):
+    """
+    Loads image data from h5py files.
+    Returns a Dataset that can load data on-demand or into memory.
+    """
+    def load(self, config_data):
+        from correct_il.datasets import H5pyImageDataset
+        
+        data_path = getattr(config_data, 'h5py_path', config_data.pkl)
+        demo_prefix = getattr(config_data, 'demo_prefix', 'demo_')
+        load_into_memory = getattr(config_data, 'load_into_memory', True)  # Default to True for speed
+        
+        # Return a Dataset (load into memory by default for faster training)
+        dataset = H5pyImageDataset(data_path, demo_prefix=demo_prefix, load_into_memory=load_into_memory)
+        print(f'Created H5pyImageDataset with {len(dataset)} samples')
+        print(f'Image shape: {dataset.image_shape}, Action dim: {dataset.act_dim}')
+        print(f'Load into memory: {load_into_memory}')
+        
+        return dataset
+
+
+class DirectArrayLoader(DataLoader):
+    """
+    Loads data directly from numpy arrays or pre-processed data.
+    Can load from file paths or use provided arrays.
+    """
+    def load(self, config_data):
+        # Check if arrays are provided directly in config
+        if hasattr(config_data, 'observations') and hasattr(config_data, 'actions'):
+            obs = config_data.observations
+            acts = config_data.actions
+            
+            # Handle both file paths and arrays
+            if isinstance(obs, str):
+                obs = np.load(obs)
+            if isinstance(acts, str):
+                acts = np.load(acts)
+            
+            # Create next observations
+            next_obs = obs[1:]
+            obs = obs[:-1]
+            acts = acts[:-1]
+            
+            print(f'Loaded {len(obs)} samples from direct arrays')
+            return obs, acts, next_obs
+        
+        # Try loading from specified files
+        obs_path = getattr(config_data, 'observations_path', None)
+        acts_path = getattr(config_data, 'actions_path', None)
+        
+        if obs_path and acts_path:
+            obs = np.load(obs_path)
+            acts = np.load(acts_path)
+            next_obs = obs[1:]
+            obs = obs[:-1]
+            acts = acts[:-1]
+            print(f'Loaded {len(obs)} samples from numpy files')
+            return obs, acts, next_obs
+        
+        raise ValueError("DirectArrayLoader requires 'observations' and 'actions' in config, or 'observations_path' and 'actions_path'")
+
+
+class CustomLoader(DataLoader):
+    """
+    Loads data using a custom function specified in config.
+    """
+    def load(self, config_data):
+        loader_func = getattr(config_data, 'loader_func', None)
+        if loader_func is None:
+            raise ValueError("CustomLoader requires 'loader_func' in config")
+        
+        if isinstance(loader_func, str):
+            # Import and call the function
+            module_path, func_name = loader_func.rsplit('.', 1)
+            import importlib
+            module = importlib.import_module(module_path)
+            loader_func = getattr(module, func_name)
+        
+        return loader_func(config_data)
+
+
+# Data loader registry
+DATA_LOADERS = {
+    'pickle': PickleTrajectoryLoader,
+    'pickle_images': PickleImageLoader,
+    'h5py': H5pyLoader,
+    'direct': DirectArrayLoader,
+    'custom': CustomLoader,
+}
+
+
+def load_data_flexible(config_data):
+    """
+    Flexible data loading function that supports multiple formats and sources.
+    
+    Config options:
+    - data.loader: 'pickle', 'pickle_images', 'h5py', 'direct', 'custom' (default: auto-detect)
+    - data.pkl: Path to pickle file
+    - data.h5py_path: Path to h5py file
+    - data.image_shape: (H, W, C) for image data
+    - data.use_images: bool, whether to use image loader
+    - data.observations/actions: Direct numpy arrays
+    - data.observations_path/actions_path: Paths to numpy files
+    - data.loader_func: Custom loader function (string path or callable)
+    
+    Returns:
+        Tuple of (observations, actions, next_observations)
+    """
+    # Determine loader type
+    loader_type = getattr(config_data, 'loader', None)
+    use_images = getattr(config_data, 'use_images', False)
+    
+    # Auto-detect if not specified
+    if loader_type is None:
+        if use_images:
+            loader_type = 'pickle_images'
+        elif hasattr(config_data, 'h5py_path'):
+            loader_type = 'h5py'
+        elif hasattr(config_data, 'observations') or hasattr(config_data, 'observations_path'):
+            loader_type = 'direct'
+        elif hasattr(config_data, 'loader_func'):
+            loader_type = 'custom'
+        else:
+            loader_type = 'pickle'  # Default
+    
+    # Get loader class
+    if loader_type not in DATA_LOADERS:
+        raise ValueError(f"Unknown loader type: {loader_type}. Available: {list(DATA_LOADERS.keys())}")
+    
+    loader_class = DATA_LOADERS[loader_type]
+    loader = loader_class()
+    
+    print(f'Using data loader: {loader_type}')
+    return loader.load(config_data)
 
 def dataset_to_d3rlpy(s, a, _):
     import d3rlpy
@@ -274,27 +493,48 @@ def parse_config(parser):
 
     config['output']['location'] = os.path.expandvars(config['output']['location'])
     config['output']['location'] = os.path.join(config['output']['location'], f'seed{config["seed"]}')
-    config['data']['pkl'] = os.path.expandvars(config['data']['pkl'])
+    
+    # Handle different data path types (pkl, h5py_path, etc.)
+    if 'pkl' in config['data']:
+        config['data']['pkl'] = os.path.expandvars(config['data']['pkl'])
+    if 'h5py_path' in config['data']:
+        config['data']['h5py_path'] = os.path.expandvars(config['data']['h5py_path'])
+    if 'observations_path' in config['data']:
+        config['data']['observations_path'] = os.path.expandvars(config['data']['observations_path'])
+    if 'actions_path' in config['data']:
+        config['data']['actions_path'] = os.path.expandvars(config['data']['actions_path'])
+    
     config['output']['folder'] = os.path.join(
         config['output']['location'],
         f"{config['env']}{config['output']['folder_suffix']}")
     _folder = config['output']['folder']
     config = Namespace(config)
 
-    print(config.policy.naive, "??")
-
     # Generate intermediate filenames
     dynamics_optional = "" if config.dynamics.lipschitz_type == "none" else f"L{config.dynamics.lipschitz_constraint}"
     config['output']['dynamics'] = os.path.join(_folder, f"dynamics_{config.dynamics.lipschitz_type}{dynamics_optional}")
-    config['output']['aug'] = os.path.join(_folder, f"data/{config.aug.type}_{config.dynamics.lipschitz_type}{dynamics_optional}")
-    if config.policy.naive:
-        policy_folder = "policy/naive"
+    
+    # Handle optional aug and policy sections
+    if hasattr(config, 'aug') and hasattr(config.aug, 'type'):
+        config['output']['aug'] = os.path.join(_folder, f"data/{config.aug.type}_{config.dynamics.lipschitz_type}{dynamics_optional}")
     else:
-        policy_folder = f"policy/{config.aug.type}_{config.dynamics.lipschitz_type}{dynamics_optional}"
-    if config.policy.noise_bc:
-        # policy_folder = f"{policy_folder}_noise_{config.policy.noise_bc}"
-        policy_folder = f"policy/noise_{config.policy.noise_bc}"
-    config['output']['policy'] = os.path.join(_folder, policy_folder)
+        config['output']['aug'] = os.path.join(_folder, f"data/default_{config.dynamics.lipschitz_type}{dynamics_optional}")
+    
+    if hasattr(config, 'policy'):
+        if hasattr(config.policy, 'naive') and config.policy.naive:
+            policy_folder = "policy/naive"
+        elif hasattr(config, 'aug') and hasattr(config.aug, 'type'):
+            policy_folder = f"policy/{config.aug.type}_{config.dynamics.lipschitz_type}{dynamics_optional}"
+        else:
+            policy_folder = f"policy/default_{config.dynamics.lipschitz_type}{dynamics_optional}"
+        
+        if hasattr(config.policy, 'noise_bc') and config.policy.noise_bc:
+            policy_folder = f"policy/noise_{config.policy.noise_bc}"
+        
+        config['output']['policy'] = os.path.join(_folder, policy_folder)
+    else:
+        config['output']['policy'] = os.path.join(_folder, "policy/default")
+    
     return config
 
 

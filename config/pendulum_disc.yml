@@ -21,7 +21,7 @@ dynamics:
   weight_decay: 0.00001
   layers: [256, 256]
   activation: relu
-  train_epochs: 500
+  train_epochs: 50
   batch_size: 2048
   val_percentage: 1
 aug:

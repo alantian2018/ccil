@@ -238,10 +238,8 @@ def main():
         
         # Report Validation Loss
         prediction_error = dynamics.eval_prediction_error(
-            images, actions, next_images, d_config.batch_size)
+            train_dataset, d_config.batch_size)
         
-        # Save distribution of local lipschitz coefficients over data
-        local_L = dynamics.eval_lipschitz_coeff(images, actions, batch_size=1024)
     else:
         # Use regular WorldModel
         dynamics = WorldModel(s.shape[1], actions.shape[1], d_config=d_config,

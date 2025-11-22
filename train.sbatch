@@ -7,8 +7,11 @@
 #SBATCH --cpus-per-task=15
 #SBATCH --mem=128G
 #SBATCH --time=8:00:00
-#SBATCH --exclude="spot,crushinator,sonny,xaea-12,dave,deebot,chitti,clippy"
 
+
+export PYTHONUNBUFFERED=TRUE
+source ~/.bashrc
+source /nethome/atian31/flash8/miniconda3/etc/profile.d/conda.sh
 cd /nethome/atian31/flash8/repos/CCIL/
 conda activate ccil
 

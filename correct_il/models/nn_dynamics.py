@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
-from typing import Callable, Sequence, Tuple
+from typing import Callable, Sequence, Tuple, Optional
 from functools import partial
 from collections import defaultdict
 
@@ -16,6 +16,12 @@ try:
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
+
+try:
+    import torchvision.models as models
+    TORCHVISION_AVAILABLE = True
+except ImportError:
+    TORCHVISION_AVAILABLE = False
 
 from correct_il.models.spectral_norm import apply_spectral_norm
 
@@ -335,6 +341,138 @@ def wrapper_mse_loss(_, Y_pred, Y):
         'mean_error': F.mse_loss(Y_pred, Y).detach().cpu().numpy()
     }
 
+class PerceptualLoss(nn.Module):
+    """
+    Perceptual loss using ResNet features.
+    Computes L2 distance between feature maps from a pre-trained ResNet network.
+    """
+    def __init__(self, resnet_type='resnet18', device='cuda'):
+        """
+        Args:
+            resnet_type: Type of ResNet to use ('resnet18' or 'resnet34')
+            device: Device to run on
+        """
+        super(PerceptualLoss, self).__init__()
+        
+        if not TORCHVISION_AVAILABLE:
+            raise ImportError("torchvision is required for perceptual loss. Install with: pip install torchvision")
+        
+        # Load pre-trained ResNet
+        # Handle both old and new torchvision API
+        try:
+            # New API (torchvision 0.13+)
+            if resnet_type == 'resnet18':
+                resnet = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1).to(device)
+            elif resnet_type == 'resnet34':
+                resnet = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1).to(device)
+            else:
+                raise ValueError(f"Unsupported ResNet type: {resnet_type}. Use 'resnet18' or 'resnet34'")
+        except (AttributeError, TypeError):
+            # Old API (torchvision < 0.13)
+            if resnet_type == 'resnet18':
+                resnet = models.resnet18(pretrained=True).to(device)
+            elif resnet_type == 'resnet34':
+                resnet = models.resnet34(pretrained=True).to(device)
+            else:
+                raise ValueError(f"Unsupported ResNet type: {resnet_type}. Use 'resnet18' or 'resnet34'")
+        
+        resnet.eval()
+        
+        # Freeze ResNet parameters
+        for param in resnet.parameters():
+            param.requires_grad = False
+        
+        # Extract feature layers from ResNet
+        # We'll extract features from: conv1+bn1+relu, layer1, layer2, layer3, layer4
+        self.conv1 = resnet.conv1
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
+        self.layer1 = resnet.layer1
+        self.layer2 = resnet.layer2
+        self.layer3 = resnet.layer3
+        self.layer4 = resnet.layer4
+        
+        # Normalization for ImageNet pre-trained models
+        # ResNet expects input in range [0, 1] with mean [0.485, 0.456, 0.406] and std [0.229, 0.224, 0.225]
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+    
+    def preprocess_image(self, img):
+        """
+        Preprocess image for ResNet network.
+        Converts from [0, 1] range to ImageNet normalized range.
+        Expects input in (B, H, W, C) or (B, C, H, W) format.
+        Handles different channel counts by converting to 3-channel RGB.
+        """
+        # Convert to (B, C, H, W) format if needed
+        if img.dim() == 4:
+            if img.shape[-1] in [1, 3]:  # (B, H, W, C) format
+                img = img.permute(0, 3, 1, 2)
+        
+        # Handle channel count: ResNet expects 3 channels
+        if img.shape[1] == 1:
+            # Grayscale: replicate to 3 channels
+            img = img.repeat(1, 3, 1, 1)
+        elif img.shape[1] > 3:
+            # More than 3 channels: take first 3
+            img = img[:, :3, :, :]
+        # If 3 channels, use as is
+        
+        # Normalize to ImageNet stats
+        img = (img - self.mean) / self.std
+        return img
+    
+    def extract_features(self, x):
+        """Extract features from multiple layers of ResNet."""
+        x = self.preprocess_image(x)
+        features = []
+        
+        # Initial conv block
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        features.append(x)  # After conv1
+        
+        # Maxpool
+        x = self.maxpool(x)
+        
+        # Residual blocks
+        x = self.layer1(x)
+        features.append(x)  # After layer1
+        
+        x = self.layer2(x)
+        features.append(x)  # After layer2
+        
+        x = self.layer3(x)
+        features.append(x)  # After layer3
+        
+        x = self.layer4(x)
+        features.append(x)  # After layer4
+        
+        return features
+    
+    def forward(self, pred, target):
+        """
+        Compute perceptual loss between predicted and target images.
+        
+        Args:
+            pred: Predicted images (B, H, W, C) or (B, C, H, W)
+            target: Target images (B, H, W, C) or (B, C, H, W)
+        
+        Returns:
+            Perceptual loss scalar
+        """
+        pred_features = self.extract_features(pred)
+        target_features = self.extract_features(target)
+        
+        # Compute L2 loss for each feature layer and average
+        loss = 0.0
+        for pred_feat, target_feat in zip(pred_features, target_features):
+            loss += F.mse_loss(pred_feat, target_feat)
+        
+        return loss / len(pred_features)
+
 def dreamer_image_loss(X, Y_pred, Y, image_encoder, image_decoder, 
                        next_images_true, out_shift, out_scale,
                        reconstruction_weight=1.0, dynamics_weight=1.0,
@@ -342,7 +480,11 @@ def dreamer_image_loss(X, Y_pred, Y, image_encoder, image_decoder,
                        soft_lipschitz_penalty_weight=None, 
                        soft_lipschitz_sampling_eps=None,
                        soft_lipschitz_n_samples=None,
-                       reconstruction_weights=None):
+                       reconstruction_weights=None,
+                       use_perceptual_loss=False,
+                       mse_weight=0.85,
+                       perceptual_weight=0.15,
+                       perceptual_loss_fn=None):
     """
     Dreamer-style loss for image-based dynamics models.
     
@@ -407,7 +549,8 @@ def dreamer_image_loss(X, Y_pred, Y, image_encoder, image_decoder,
     
     # Images should already be normalized to [0, 1] outside the model
     
-    # Compute reconstruction loss with optional weights
+    # Compute MSE reconstruction loss with optional weights
+    mse_reconstruction_loss = None
     if reconstruction_weights is not None:
         # Ensure weights are on the same device and have the same shape
         reconstruction_weights = reconstruction_weights.to(next_images_pred.device)
@@ -423,9 +566,22 @@ def dreamer_image_loss(X, Y_pred, Y, image_encoder, image_decoder,
         den = reconstruction_weights.sum(dim=(1,2,3)) + 1e-8
 
         # mean over batch
-        reconstruction_loss = (num / den).mean()
+        mse_reconstruction_loss = (num / den).mean()
     else:
-        reconstruction_loss = F.mse_loss(next_images_pred, next_images_true)
+        mse_reconstruction_loss = F.mse_loss(next_images_pred, next_images_true)
+    
+    # Compute perceptual loss if enabled
+    perceptual_reconstruction_loss = None
+    if use_perceptual_loss and perceptual_loss_fn is not None:
+        perceptual_reconstruction_loss = perceptual_loss_fn(next_images_pred, next_images_true)
+    
+    # Combine MSE and perceptual losses based on configuration
+    if use_perceptual_loss and perceptual_loss_fn is not None:
+        # Weighted combination: mse_weight * MSE + perceptual_weight * Perceptual
+        reconstruction_loss = mse_weight * mse_reconstruction_loss + perceptual_weight * perceptual_reconstruction_loss
+    else:
+        # Use only MSE loss
+        reconstruction_loss = mse_reconstruction_loss
     
     # 3. Lipschitz penalty (if enabled) - applied to latent space dynamics
     lipschitz_penalty = None
@@ -464,8 +620,12 @@ def dreamer_image_loss(X, Y_pred, Y, image_encoder, image_decoder,
         'loss': total_loss,
         'dynamics_loss': dynamics_loss.detach().cpu().numpy(),
         'reconstruction_loss': reconstruction_loss.detach().cpu().numpy(),
+        'mse_reconstruction_loss': mse_reconstruction_loss.detach().cpu().numpy(),
         'mean_error': F.mse_loss(Y_pred, Y).detach().cpu().numpy()
     }
+    
+    if perceptual_reconstruction_loss is not None:
+        result['perceptual_reconstruction_loss'] = perceptual_reconstruction_loss.detach().cpu().numpy()
     
     if lipschitz_penalty is not None:
         result['lipschitz_penalty'] = lipschitz_penalty.detach().cpu().numpy()
@@ -1012,6 +1172,21 @@ class ImageWorldModel:
             elif not isinstance(reconstruction_weights, torch.Tensor):
                 reconstruction_weights = torch.tensor(reconstruction_weights).float()
         
+        # Check if perceptual loss should be used
+        use_perceptual_loss = getattr(self.d_config, 'use_perceptual_loss', False)
+        mse_weight = getattr(self.d_config, 'mse_weight', 0.85)
+        perceptual_weight = getattr(self.d_config, 'perceptual_weight', 0.15)
+        
+        # Initialize perceptual loss function if enabled
+        perceptual_loss_fn = None
+        if use_perceptual_loss:
+            if not TORCHVISION_AVAILABLE:
+                raise ImportError("torchvision is required for perceptual loss. Install with: pip install torchvision")
+            perceptual_loss_fn = PerceptualLoss(device=self.device).to(self.device)
+            perceptual_loss_fn.eval()  # Set to eval mode
+            for param in perceptual_loss_fn.parameters():
+                param.requires_grad = False
+        
         # Create Dreamer-style loss function
         # It will receive s_latent_batch (already encoded in forward pass)
         def dreamer_loss_fn(batch_X, Y_pred, Y_true, batch_weights=None):
@@ -1041,7 +1216,11 @@ class ImageWorldModel:
                 soft_lipschitz_penalty_weight=soft_lipschitz_penalty_weight,
                 soft_lipschitz_sampling_eps=soft_lipschitz_sampling_eps,
                 soft_lipschitz_n_samples=soft_lipschitz_n_samples,
-                reconstruction_weights=batch_weights
+                reconstruction_weights=batch_weights,
+                use_perceptual_loss=use_perceptual_loss,
+                mse_weight=mse_weight,
+                perceptual_weight=perceptual_weight,
+                perceptual_loss_fn=perceptual_loss_fn
             )
         
         # Create a wrapper model that encodes images per-batch and uses (s, a) for forward pass

@@ -1,9 +1,9 @@
 seed: 42
 no_gpu: False
-env: "libero_spatial"
+env: "libero_spatial_2048_latent_dim"
 use_wandb: true
 wandb_project: "ccil-dynamics"
-wandb_name: "libero_spatial"
+wandb_name: "libero_spatial_2048_latent_dim"
 
 visualize_reconstructions: true
 visualize_interval: 50
@@ -35,8 +35,11 @@ dynamics:
   layers: [512, 512]
   activation: relu
   train_epochs: 20000
-  batch_size: 32  # Smaller batch size for images
+  batch_size: 256  # Smaller batch size for images
   val_percentage: 1
-  latent_dim: 1024
+  latent_dim: 2048
   reconstruction_weight: 1.0
   dynamics_weight: 1.0
+  use_perceptual_loss: false
+  mse_weight: 0.85
+  perceptual_weight: 0.15

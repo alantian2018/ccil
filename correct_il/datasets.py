@@ -183,7 +183,7 @@ class H5pyImageDataset(Dataset):
                     self.actions[idx] = actions.astype(np.float32)
             
             # Compute reconstruction weights from masks if available
-            if self.has_mask and self.mask_weight is not None:
+            if self.has_mask and self.mask_weight > 0:
                 # Convert boolean masks to float: True -> 1.0, False -> 0.0
                 mask_values = self.masks.astype(np.float32)  # (N, H, W)
                 # Compute weights: 1 + mask_weight * mask_values
@@ -192,8 +192,9 @@ class H5pyImageDataset(Dataset):
                 weights = np.expand_dims(weights, axis=-1)  # (N, H, W, 1)
                 weights = np.repeat(weights, self.image_shape[2], axis=-1)  # (N, H, W, 3)
                 self.reconstruction_weights = weights.astype(np.float32)
-            elif self.has_mask:
+            elif self.has_mask or self.mask_weight == 0:
                 # If mask_weight is None, use uniform weights
+                print(f"Using uniform weights for reconstruction")
                 self.reconstruction_weights = np.ones((len(self.indices),) + self.image_shape, dtype=np.float32)
             else:
                 self.reconstruction_weights = None

@@ -1,9 +1,9 @@
 seed: 42
 no_gpu: False
-env: "libero_spatial_2048_latent_dim"
+env: "libero_spatial_2048_latent_dim_perceptual_0.99_0.001_no_mask_weight"
 use_wandb: true
 wandb_project: "ccil-dynamics"
-wandb_name: "libero_spatial_2048_latent_dim"
+wandb_name: "libero_spatial_2048_latent_dim_perceptual_0.99_0.001_no_mask_weight"
 
 visualize_reconstructions: true
 visualize_interval: 50
@@ -23,7 +23,7 @@ data:
   horizon: '...'
   num_datapoints: '...'
   action_horizon: 10
-  mask_weight: 4
+  mask_weight: 0 # no extra weighting for the robot
 dynamics:
   lipschitz_type: "soft_sampling"
   lipschitz_constraint: 2.0
@@ -35,11 +35,11 @@ dynamics:
   layers: [512, 512]
   activation: relu
   train_epochs: 20000
-  batch_size: 256  # Smaller batch size for images
+  batch_size: 512
   val_percentage: 1
   latent_dim: 2048
   reconstruction_weight: 1.0
   dynamics_weight: 1.0
-  use_perceptual_loss: false
-  mse_weight: 0.85
-  perceptual_weight: 0.15
+  use_perceptual_loss: true
+  mse_weight: 0.99
+  perceptual_weight: 0.01

@@ -463,6 +463,7 @@ class PerceptualLoss(nn.Module):
         Returns:
             Perceptual loss scalar
         """
+        
         pred_features = self.extract_features(pred)
         target_features = self.extract_features(target)
         
